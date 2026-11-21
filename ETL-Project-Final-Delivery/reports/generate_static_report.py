@@ -1,135 +1,82 @@
-import sqlite3
 import logging
-from datetime import datetime, timezone
-import pandas as pd
+import sqlite3
+from pathlib import Path
+
 import matplotlib.pyplot as plt
-import seaborn as sns
+import pandas as pd
+
 from src.utils.config import DB_PATH, REPORT_OUTPUT_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-sns.set_theme(style="whitegrid")
 
+def generate_analytical_report(db_path: Path = DB_PATH, output_dir: Path = REPORT_OUTPUT_DIR) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
 
-def generate_report():
-    REPORT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("""
-            SELECT
-                f.incident_id,
-                f.hour_of_day,
-                f.temperature_c,
-                f.precipitation_mm,
-                f.traffic_density_index,
-                f.victims_count,
-                f.is_severe_injury,
-                d.day_name,
-                d.is_weekend,
-                l.comuna,
-                l.zona,
-                l.via_tipo,
-                v.clase_vehiculo,
-                w.weather_condition
-            FROM fact_traffic_incident f
-            JOIN dim_date d ON f.date_key = d.date_key
-            JOIN dim_location l ON f.location_key = l.location_key
-            JOIN dim_vehicle v ON f.vehicle_key = v.vehicle_key
-            JOIN dim_weather w ON f.weather_key = w.weather_key
-        """, conn)
+    try:
+        df_annual = pd.read_sql("SELECT * FROM vw_resumen_anual_gravedad;", conn)
+        df_risk = pd.read_sql("SELECT * FROM vw_riesgo_por_vehiculo_clima LIMIT 10;", conn)
+        try:
+            df_victims = pd.read_sql(
+                "SELECT * FROM dim_victimas_historico ORDER BY total_2004_2021 DESC;", conn
+            )
+        except Exception:
+            df_victims = pd.DataFrame()
+    finally:
+        conn.close()
 
-    if df.empty:
-        raise ValueError("Dimensional database is empty. Run the ETL pipeline first.")
-
-    # Chart 1: Severity Rate by Vehicle Type
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    veh_summary = (df.groupby("clase_vehiculo")["is_severe_injury"].mean() * 100).sort_values(ascending=False)
-    sns.barplot(x=veh_summary.index, y=veh_summary.values, palette="Blues_d", ax=ax)
-    ax.set_title("Severe Injury Rate (%) by Vehicle Class")
-    ax.set_ylabel("Severe Injury Rate (%)")
-    ax.set_xlabel("Vehicle Class")
-    plt.xticks(rotation=25, ha="right")
-    plt.tight_layout()
-    chart1_path = REPORT_OUTPUT_DIR / "chart1_severity_by_vehicle.png"
-    plt.savefig(chart1_path, dpi=150)
-    plt.close()
-
-    # Chart 2: Hourly Incident Volume & Rain Impact
+    # Chart 1: Annual severe crash rate
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    hourly = df.groupby(["hour_of_day", "weather_condition"]).size().reset_index(name="incidents")
-    sns.lineplot(data=hourly, x="hour_of_day", y="incidents", hue="weather_condition", marker="o", ax=ax)
-    ax.set_title("Hourly Incident Distribution by Weather Condition")
-    ax.set_xlabel("Hour of Day (0-23)")
-    ax.set_ylabel("Number of Incidents")
+    ax.bar(df_annual["anio"].astype(str), df_annual["tasa_gravedad_pct"], color="#6A4C93")
+    ax.set_title("Annual Severe Crash Rate (%) in Cali")
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Severe Crash Rate (%)")
     plt.tight_layout()
-    chart2_path = REPORT_OUTPUT_DIR / "chart2_hourly_weather_impact.png"
+    chart1_path = output_dir / "annual_severity_rate.png"
+    plt.savefig(chart1_path, dpi=150)
+    plt.close(fig)
+
+    # Chart 2: Top vehicle & accident class severity risk
+    fig, ax = plt.subplots(figsize=(10, 5))
+    labels = df_risk["vehiculos_implicados"] + " | " + df_risk["clase_accidente"]
+    ax.barh(labels[::-1], df_risk["tasa_gravedad_pct"][::-1], color="#8E6CC3")
+    ax.set_title("Top Severity Rates by Vehicle & Accident Class")
+    ax.set_xlabel("Severe Crash Rate (%)")
+    plt.tight_layout()
+    chart2_path = output_dir / "top_risk_combinations.png"
     plt.savefig(chart2_path, dpi=150)
-    plt.close()
+    plt.close(fig)
 
-    # Chart 3: Incident Hotspots by Comuna & Severity (Top 10)
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    comuna_stats = (
-        df.groupby("comuna")
-        .agg(total_incidents=("incident_id", "count"), severe_rate=("is_severe_injury", "mean"))
-        .sort_values("total_incidents", ascending=False)
-        .head(10)
+    total_events = int(df_annual["total_siniestros"].sum()) if not df_annual.empty else 0
+    total_severe = int(df_annual["total_graves"].sum()) if not df_annual.empty else 0
+    overall_rate = round(100.0 * total_severe / max(total_events, 1), 2)
+
+    top_victim = (
+        f"{df_victims.iloc[0]['condicion_victima']} ({df_victims.iloc[0]['total_2004_2021']} fatalities, "
+        f"{df_victims.iloc[0]['participacion_pct']}%)"
+        if not df_victims.empty
+        else "Historical victim dimension not loaded"
     )
-    sns.barplot(x=comuna_stats.index, y=comuna_stats["total_incidents"], palette="crest", ax=ax)
-    ax.set_title("Top Comunas by Traffic Incidents in Cali")
-    ax.set_xlabel("Comuna")
-    ax.set_ylabel("Total Incidents")
-    plt.xticks(rotation=25, ha="right")
-    plt.tight_layout()
-    chart3_path = REPORT_OUTPUT_DIR / "chart3_incidents_by_comuna.png"
-    plt.savefig(chart3_path, dpi=150)
-    plt.close()
 
-    # Analytical Insights Summary
-    total_incidents = len(df)
-    overall_severe_pct = df["is_severe_injury"].mean() * 100
-    top_vehicle = veh_summary.index[0]
-    top_vehicle_rate = veh_summary.iloc[0]
+    report_md = output_dir / "mobility_analytical_report.md"
+    content = f"""# Cali Mobility Analytical Report
 
-    rain_mask = df["weather_condition"].astype(str).str.contains("rain|lluv", case=False, na=False)
-    rain_df = df[rain_mask]
-    clear_df = df[~rain_mask]
+## Executive Summary & Key Insights
+- **Total Analyzed Incidents**: {total_events:,} records across the star schema.
+- **Confirmed Severe Incidents (`es_grave = 1`)**: {total_severe:,} ({overall_rate}% overall severe rate).
+- **Historical Victim Vulnerability (2004-2021)**: Highest fatality burden corresponds to **{top_victim}**.
+- **Operational Takeaway**: Severe injury/fatality risk concentrates in vulnerable road users and specific vehicle/collision profiles, supporting targeted patrol allocation and weather-aware alerts.
 
-    rain_severe_str = f"{rain_df['is_severe_injury'].mean() * 100:.2f}%" if not rain_df.empty else "N/A"
-    clear_severe_str = f"{clear_df['is_severe_injury'].mean() * 100:.2f}%" if not clear_df.empty else "N/A"
-
-    top_comuna = comuna_stats.index[0]
-    generated_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-    report_md = f"""# Static Analytical Report: Cali Traffic Incidents & Weather Impact
-**Generated at (UTC):** {generated_ts}
-**Data Source:** Validated Dimensional Warehouse (`fact_traffic_incident` + 4 Dimensions)
-
-## 1. Executive KPIs
-- **Total Validated Incidents Analyzed:** {total_incidents:,}
-- **Overall Severe Injury Rate:** {overall_severe_pct:.2f}%
-- **Highest-Risk Vehicle Category:** {top_vehicle} ({top_vehicle_rate:.2f}% severe injury rate)
-- **Most Affected Urban Zone:** {top_comuna} ({int(comuna_stats.loc[top_comuna, 'total_incidents'])} incidents)
-
-## 2. Analytical Questions & Key Findings
-
-### Q1: Which vehicle classes experience the highest proportion of severe injuries?
-- **{top_vehicle}** accounts for the highest severity rate at **{top_vehicle_rate:.2f}%**, highlighting higher exposure to severe outcomes among this vehicle group.
-- ![Severity by Vehicle](chart1_severity_by_vehicle.png)
-
-### Q2: How do weather conditions (rainfall) and time of day affect incident severity?
-- During **Rainy** conditions, the severe injury rate is **{rain_severe_str}** compared to **{clear_severe_str}** under non-rainy conditions.
-- Comparing hourly incident counts across weather conditions helps identify peak hours where congestion and rain overlap.
-- ![Hourly Weather Impact](chart2_hourly_weather_impact.png)
-
-### Q3: Where should municipal transit authorities prioritize preventive deployment?
-- **{top_comuna}** leads in incident volume among the top evaluated comunas, making it a priority focus for preventive mobility interventions.
-- ![Incidents by Comuna](chart3_incidents_by_comuna.png)
+## Generated Charts
+- Annual Severity Rate: `{chart1_path.name}`
+- Top Risk Combinations: `{chart2_path.name}`
 """
-
-    report_file = REPORT_OUTPUT_DIR / "static_analytical_report.md"
-    report_file.write_text(report_md, encoding="utf-8")
-    logger.info(f"Static analytical report generated at {report_file}")
+    report_md.write_text(content, encoding="utf-8")
+    logger.info(f"Static analytical report generated at {report_md}")
+    return report_md
 
 
 if __name__ == "__main__":
-    generate_report()
+    generate_analytical_report()

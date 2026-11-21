@@ -1,33 +1,48 @@
 import logging
+
+from ml.train_model import train_and_save_model
 from src.etl.extract import (
     extract_source_1_accidents,
+    extract_source_2_homicides_history,
     extract_source_2_infrastructure,
     extract_source_3_weather_api,
 )
+from src.etl.load import load_to_warehouse
 from src.etl.transform import transform_and_integrate
-from src.quality.validator import validate_enriched_dataset
-from src.etl.load import load_dimensional_model
+from src.quality.validator import validate_transformed_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def run_full_etl():
-    logger.info("=== Step 1: Extracting 3 Data Sources ===")
-    df1 = extract_source_1_accidents()
-    df2 = extract_source_2_infrastructure()
-    df3 = extract_source_3_weather_api()
+def run_end_to_end_pipeline(train_ml: bool = True) -> dict:
+    """
+    Executes the batch ETL pipeline, data quality gate, Star Schema load,
+    and optional ML model training.
+    """
+    logger.info("Starting Cali mobility ETL & ML pipeline...")
 
-    logger.info("=== Step 2: Transforming & Integrating Sources ===")
-    df_enriched = transform_and_integrate(df1, df2, df3)
+    df_accidents = extract_source_1_accidents()
+    df_infra = extract_source_2_infrastructure()
+    df_weather = extract_source_3_weather_api()
+    df_homicides_hist = extract_source_2_homicides_history()
 
-    logger.info("=== Step 3: Running Data Quality Validation Gate ===")
-    validate_enriched_dataset(df_enriched)
+    df_enriched = transform_and_integrate(df_accidents, df_infra, df_weather)
+    dq_report = validate_transformed_data(df_enriched)
 
-    logger.info("=== Step 4: Loading Dimensional Model (Star Schema) ===")
-    load_dimensional_model(df_enriched)
-    logger.info("=== ETL Pipeline Completed Successfully ===")
+    load_to_warehouse(df_enriched, df_homicides_hist=df_homicides_hist)
+
+    ml_metrics = {}
+    if train_ml:
+        ml_metrics = train_and_save_model()
+
+    summary = {
+        "dq_report": dq_report,
+        "ml_metrics": ml_metrics,
+    }
+    logger.info("Pipeline completed successfully.")
+    return summary
 
 
 if __name__ == "__main__":
-    run_full_etl()
+    run_end_to_end_pipeline(train_ml=True)

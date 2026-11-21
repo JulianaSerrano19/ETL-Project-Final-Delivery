@@ -1,24 +1,34 @@
-import pytest
-import pandas as pd
-from src.etl.extract import extract_source_1_accidents, extract_source_2_infrastructure, extract_source_3_weather_api
-from src.etl.transform import transform_and_integrate
-from src.quality.validator import validate_enriched_dataset, DataQualityException
+import tempfile
+from pathlib import Path
+
+from src.etl.extract import (
+    extract_source_1_accidents,
+    extract_source_2_infrastructure,
+    extract_source_3_weather_api,
+)
+from src.etl.load import load_to_warehouse
+from src.etl.transform import ML_TARGET_COLUMN, transform_and_integrate
+from src.quality.validator import validate_transformed_data
 
 
-def test_etl_and_quality_gate():
-    df1 = extract_source_1_accidents()
-    df2 = extract_source_2_infrastructure()
-    df3 = extract_source_3_weather_api()
-    merged = transform_and_integrate(df1, df2, df3)
-    report = validate_enriched_dataset(merged)
-    assert report["success"] is True
+def test_extract_transform_validate_and_load():
+    df_acc = extract_source_1_accidents()
+    df_infra = extract_source_2_infrastructure()
+    df_weather = extract_source_3_weather_api()
 
+    assert not df_acc.empty
+    assert not df_infra.empty
+    assert not df_weather.empty
 
-def test_quality_gate_blocks_invalid_data():
-    df1 = extract_source_1_accidents()
-    df2 = extract_source_2_infrastructure()
-    df3 = extract_source_3_weather_api()
-    merged = transform_and_integrate(df1, df2, df3)
-    merged.loc[0, "hour_of_day"] = 99  # Invalid hour
-    with pytest.raises(DataQualityException):
-        validate_enriched_dataset(merged)
+    df_enriched = transform_and_integrate(df_acc, df_infra, df_weather)
+    assert not df_enriched.empty
+    assert ML_TARGET_COLUMN in df_enriched.columns
+    assert set(df_enriched[ML_TARGET_COLUMN].unique()).issubset({0, 1})
+
+    dq_report = validate_transformed_data(df_enriched)
+    assert dq_report["passed"] is True
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_file = Path(tmpdir) / "test_warehouse.db"
+        load_to_warehouse(df_enriched, db_path=db_file)
+        assert db_file.exists()

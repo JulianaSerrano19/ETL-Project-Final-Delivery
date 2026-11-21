@@ -1,87 +1,208 @@
 import logging
 import numpy as np
 import pandas as pd
+
 from src.utils.config import DATA_PROCESSED_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+MISSING_TOKENS = {"", ".", "na", "n/a", "null", "none", "nan", "sd", "sin dato"}
 
-def transform_and_integrate(df_accidents: pd.DataFrame, df_infra: pd.DataFrame, df_weather: pd.DataFrame) -> pd.DataFrame:
+ML_FEATURE_COLUMNS = [
+    "anio",
+    "mes",
+    "dia_semana",
+    "es_fin_de_semana",
+    "hora_hecho",
+    "clase_accidente",
+    "medio_reporte",
+    "vehiculos_implicados",
+    "numero_vehiculos",
+    "comuna",
+    "zona",
+    "via_tipo",
+    "traffic_density_index",
+    "temperature_c",
+    "precipitation_mm",
+    "wind_speed_kmh",
+]
+ML_TARGET_COLUMN = "es_grave"
+
+
+def _clean_text_series(s: pd.Series, default: str = "No reportado") -> pd.Series:
+    cleaned = (
+        s.astype(str)
+        .str.replace("TELEF?NICO", "TELEFÓNICO", regex=False)
+        .str.replace("Ca?da", "Caída", regex=False)
+        .str.replace("Da?os", "Daños", regex=False)
+        .str.replace("Intervenci?n", "Intervención", regex=False)
+        .str.strip()
+    )
+    mask_missing = cleaned.str.lower().isin(MISSING_TOKENS) | s.isna()
+    return cleaned.where(~mask_missing, default)
+
+
+def _normalize_confirmado(s: pd.Series) -> pd.Series:
+    base = _clean_text_series(s, default="No reportado").str.lower()
+    mapping = {
+        "negativo": "Negativo",
+        "solo daños": "Solo daños",
+        "con lesionado": "Con lesionado",
+        "con heridos": "Con lesionado",
+        "choque con lesionados": "Con lesionado",
+        "con fallecido": "Con fallecido",
+        "con fallecido (foraneo)": "Con fallecido (Foraneo)",
+        "no reportado": "No reportado",
+    }
+    return base.map(mapping).fillna(base.str.title())
+
+
+def _normalize_clase_accidente(s: pd.Series) -> pd.Series:
+    base = _clean_text_series(s, default="No reportado").str.lower()
+    mapping = {
+        "choque": "Choque",
+        "atropello": "Atropello",
+        "volcamiento": "Volcamiento",
+        "caida de ocupante": "Caída de ocupante",
+        "caída de ocupante": "Caída de ocupante",
+        "caída ocupante": "Caída de ocupante",
+        "incendio": "Incendio",
+        "no aplica": "No aplica",
+        "no reportado": "No reportado",
+    }
+    return base.map(mapping).fillna(base.str.title())
+
+
+def transform_and_integrate(
+    df_accidents: pd.DataFrame,
+    df_infra: pd.DataFrame,
+    df_weather: pd.DataFrame,
+) -> pd.DataFrame:
     """
-    Cleans, standardizes, enriches, and merges all 3 data sources:
-      1. Primary Traffic Accidents (Cali)
-      2. Road Infrastructure & Traffic Density
-      3. Public Weather API (Open-Meteo)
+    Transforma y unifica las 3 fuentes conservando todos los registros válidos
+    de fact_siniestros (371,003 en fuente real) y definiendo el target `es_grave`.
     """
     logger.info("Starting transformation and multi-source integration...")
+    df1 = df_accidents.loc[:, ~df_accidents.columns.duplicated()].copy()
 
-    # Clean Source 1
-    df1 = df_accidents.drop_duplicates(subset=["incident_id"]).copy()
-    df1["fecha_dt"] = pd.to_datetime(df1["fecha_hecho"], errors="coerce")
-    df1 = df1.dropna(subset=["fecha_dt", "comuna", "barrio", "clase_vehiculo"])
-    df1["hora_hecho"] = df1["hora_hecho"].astype(int).clip(0, 23)
-    df1["victimas"] = df1["victimas"].fillna(0).astype(int)
+    rename_map = {
+        "Código": "incident_id",
+        "código": "incident_id",
+        "Fecha": "fecha_hecho",
+        "fecha": "fecha_hecho",
+        "Tipo confirmado": "tipo_confirmado",
+        "Dirección reporte": "direccion_reporte",
+        "dirección_reporte": "direccion_reporte",
+        "Tipo clase de accidente": "clase_accidente",
+        "tipo_clase_de_accidente": "clase_accidente",
+        "Medio de reporte": "medio_reporte",
+        "medio_de_reporte": "medio_reporte",
+        "Numero vehículos": "numero_vehiculos",
+        "numero_vehículos": "numero_vehiculos",
+        "Tipo de vehículos implicados": "vehiculos_implicados",
+        "tipo_de_vehículos_implicados": "vehiculos_implicados",
+        "clase_vehiculo": "vehiculos_implicados",
+        "servicio": "medio_reporte",
+    }
+    df1 = df1.rename(columns={k: v for k, v in rename_map.items() if k in df1.columns})
 
-    # Standardize text fields
-    for col in ["comuna", "barrio", "clase_vehiculo", "servicio"]:
-        df1[col] = df1[col].astype(str).str.strip()
+    # Identificador único
+    if "incident_id" in df1.columns:
+        df1["incident_id"] = _clean_text_series(df1["incident_id"], default="")
+        df1 = df1[df1["incident_id"] != ""].drop_duplicates(subset=["incident_id"], keep="first").copy()
 
-    # Clean Source 2
-    df2 = df_infra.drop_duplicates(subset=["comuna", "barrio"]).copy()
-    df2["comuna"] = df2["comuna"].astype(str).str.strip()
-    df2["barrio"] = df2["barrio"].astype(str).str.strip()
+    # Fechas y variables temporales
+    parsed_date = pd.to_datetime(df1["fecha_hecho"], errors="coerce", dayfirst=True)
+    df1 = df1[parsed_date.notna()].copy()
+    parsed_date = parsed_date.loc[df1.index]
+    df1["fecha_dt"] = parsed_date
+    df1["fecha_hecho"] = parsed_date.dt.strftime("%Y-%m-%d")
+    df1["anio"] = parsed_date.dt.year.astype(int)
+    df1["mes"] = parsed_date.dt.month.astype(int)
+    df1["dia_semana"] = parsed_date.dt.dayofweek.astype(int)
+    df1["es_fin_de_semana"] = df1["dia_semana"].isin([5, 6]).astype(int)
 
-    # Clean Source 3
-    df3 = df_weather.copy()
-    df3["hour_of_day"] = df3["hour_of_day"].astype(int)
+    if "hora_hecho" not in df1.columns:
+        df1["hora_hecho"] = 12
+    else:
+        df1["hora_hecho"] = pd.to_numeric(df1["hora_hecho"], errors="coerce").fillna(12).astype(int).clip(0, 23)
 
-    # Merge 1 + 2 (Left join on spatial keys comuna + barrio)
-    merged = pd.merge(df1, df2, on=["comuna", "barrio"], how="left")
-    merged["zona"] = merged["zona"].fillna("Urbana General")
-    merged["via_tipo"] = merged["via_tipo"].fillna("Avenida Principal")
-    merged["traffic_density_index"] = merged["traffic_density_index"].fillna(merged["traffic_density_index"].median())
+    # Target binario: es_grave (1 = lesionado o fallecido, 0 = resto)
+    if "tipo_confirmado" in df1.columns:
+        df1["tipo_confirmado_limpio"] = _normalize_confirmado(df1["tipo_confirmado"])
+        df1[ML_TARGET_COLUMN] = (
+            df1["tipo_confirmado_limpio"]
+            .isin(["Con lesionado", "Con fallecido", "Con fallecido (Foraneo)"])
+            .astype(int)
+        )
+    elif "victimas" in df1.columns:
+        vict = pd.to_numeric(df1["victimas"], errors="coerce").fillna(0)
+        df1["tipo_confirmado_limpio"] = np.where(vict >= 1, "Con lesionado", "Solo daños")
+        df1[ML_TARGET_COLUMN] = (vict >= 1).astype(int)
+    else:
+        df1["tipo_confirmado_limpio"] = "No reportado"
+        df1[ML_TARGET_COLUMN] = 0
 
-    # Merge + 3 (Join on hour_of_day)
-    merged = pd.merge(merged, df3, left_on="hora_hecho", right_on="hour_of_day", how="left")
-    merged["temperature_c"] = merged["temperature_c"].fillna(24.0)
-    merged["precipitation_mm"] = merged["precipitation_mm"].fillna(0.0)
-    merged["wind_speed_kmh"] = merged["wind_speed_kmh"].fillna(8.0)
+    # Estandarización categórica
+    if "clase_accidente" in df1.columns:
+        df1["clase_accidente"] = _normalize_clase_accidente(df1["clase_accidente"])
+    else:
+        df1["clase_accidente"] = "No reportado"
 
-    # Feature Engineering & Target Definition
-    # Target: is_severe_injury (1 if victims >= 1 AND risk factors align, reflecting realistic domain severity)
-    # Ensures coherent predictive signal between spatial, temporal, vehicle, and weather features
-    risk_score = (
-        (merged["clase_vehiculo"].isin(["Motocicleta", "Bicicleta"]).astype(float) * 0.35)
-        + (merged["precipitation_mm"] > 0.5).astype(float) * 0.25
-        + (merged["traffic_density_index"] > 0.70).astype(float) * 0.20
-        + (merged["hour_of_day"].isin([17, 18, 19, 20, 21, 22, 23, 0, 1, 2]).astype(float) * 0.20)
-    )
-    rng = np.random.default_rng(123)
-    prob = np.clip(risk_score + rng.normal(0, 0.08, size=len(merged)), 0.05, 0.95)
-    merged["is_severe_injury"] = (prob >= 0.50).astype(int)
-    merged["victims_count"] = np.where(merged["is_severe_injury"] == 1, np.maximum(merged["victimas"], 1), 0)
+    for col, default_val in [
+        ("direccion_reporte", "Sin dirección"),
+        ("medio_reporte", "No reportado"),
+        ("vehiculos_implicados", "No reportado"),
+        ("comuna", "Sin comuna en fuente"),
+        ("barrio", "Sin barrio en fuente"),
+    ]:
+        if col in df1.columns:
+            df1[col] = _clean_text_series(df1[col], default=default_val)
+        else:
+            df1[col] = default_val
 
-    # Derived Dimension Attributes
-    merged["date_key"] = merged["fecha_dt"].dt.strftime("%Y%m%d").astype(int)
-    merged["full_date"] = merged["fecha_dt"].dt.strftime("%Y-%m-%d")
-    merged["year"] = merged["fecha_dt"].dt.year
-    merged["month"] = merged["fecha_dt"].dt.month
-    merged["day"] = merged["fecha_dt"].dt.day
-    merged["day_of_week"] = merged["fecha_dt"].dt.dayofweek
-    merged["day_name"] = merged["fecha_dt"].dt.day_name()
-    merged["is_weekend"] = merged["day_of_week"].isin([5, 6]).astype(int)
+    if "numero_vehiculos" in df1.columns:
+        num_veh = pd.to_numeric(df1["numero_vehiculos"], errors="coerce")
+        df1["numero_vehiculos"] = num_veh.where((num_veh >= 1) & (num_veh <= 30), np.nan)
+    else:
+        df1["numero_vehiculos"] = np.nan
 
-    merged["weather_condition"] = np.where(merged["precipitation_mm"] > 0.5, "Rainy", "Clear/Cloudy")
-    merged["temp_range"] = pd.cut(
-        merged["temperature_c"],
-        bins=[-10, 22, 27, 50],
-        labels=["Cool (<22C)", "Mild (22-27C)", "Warm (>27C)"]
-    ).astype(str)
-    merged["precipitation_flag"] = (merged["precipitation_mm"] > 0.5).astype(int)
+    # Merge 1 + 2 (espacial si hay claves coincidentes)
+    merged = df1
+    if df_infra is not None and not df_infra.empty:
+        df2 = df_infra.loc[:, ~df_infra.columns.duplicated()].copy()
+        join_keys = [k for k in ["comuna", "barrio"] if k in merged.columns and k in df2.columns]
+        if join_keys:
+            df2 = df2.drop_duplicates(subset=join_keys, keep="first")
+            merged = pd.merge(merged, df2, on=join_keys, how="left")
+
+    merged["zona"] = merged["zona"].fillna("Urbana General") if "zona" in merged.columns else "Urbana General"
+    merged["via_tipo"] = merged["via_tipo"].fillna("Avenida Principal") if "via_tipo" in merged.columns else "Avenida Principal"
+    if "traffic_density_index" in merged.columns:
+        med = merged["traffic_density_index"].median()
+        merged["traffic_density_index"] = merged["traffic_density_index"].fillna(0.65 if pd.isna(med) else med)
+    else:
+        merged["traffic_density_index"] = 0.65
+
+    # Merge + 3 (clima horario Open-Meteo)
+    if df_weather is not None and not df_weather.empty and "hour_of_day" in df_weather.columns:
+        df3 = df_weather.drop_duplicates(subset=["hour_of_day"], keep="first").copy()
+        df3["hour_of_day"] = pd.to_numeric(df3["hour_of_day"], errors="coerce").astype("Int64")
+        merged = pd.merge(merged, df3, left_on="hora_hecho", right_on="hour_of_day", how="left")
+
+    for w_col, fill_val in [("temperature_c", 24.0), ("precipitation_mm", 0.0), ("wind_speed_kmh", 8.0)]:
+        if w_col in merged.columns:
+            merged[w_col] = pd.to_numeric(merged[w_col], errors="coerce").fillna(fill_val)
+        else:
+            merged[w_col] = fill_val
 
     DATA_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    staged_path = DATA_PROCESSED_DIR / "enriched_incidents_staged.csv"
-    merged.to_csv(staged_path, index=False)
-    logger.info(f"Integration complete. Staged {len(merged)} enriched rows at {staged_path}.")
+    out_parquet = DATA_PROCESSED_DIR / "cali_mobility_enriched.parquet"
+    merged.to_parquet(out_parquet, index=False)
+
+    logger.info(
+        f"Transformation complete. Rows={len(merged)}, "
+        f"es_grave=1: {int(merged[ML_TARGET_COLUMN].sum())} ({merged[ML_TARGET_COLUMN].mean() * 100:.2f}%)."
+    )
     return merged

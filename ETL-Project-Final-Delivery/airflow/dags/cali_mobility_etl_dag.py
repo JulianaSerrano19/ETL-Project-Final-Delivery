@@ -1,81 +1,90 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-import pandas as pd
 
 from src.etl.extract import (
     extract_source_1_accidents,
+    extract_source_2_homicides_history,
     extract_source_2_infrastructure,
     extract_source_3_weather_api,
 )
+from src.etl.load import load_to_warehouse
 from src.etl.transform import transform_and_integrate
-from src.quality.validator import validate_enriched_dataset
-from src.etl.load import load_dimensional_model
-from src.utils.config import DATA_RAW_DIR, DATA_PROCESSED_DIR
+from src.quality.validator import validate_transformed_data
+from src.utils.config import DATA_PROCESSED_DIR
 
-default_args = {
-    "owner": "data_engineering_g51",
+DEFAULT_ARGS = {
+    "owner": "data-engineering-team",
     "depends_on_past": False,
     "email_on_failure": False,
-    "retries": 1,
-    "retry_delay": timedelta(minutes=2),
+    "email_on_retry": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=3),
 }
 
 
-def task_extract_accidents():
-    df = extract_source_1_accidents()
-    df.to_pickle(DATA_RAW_DIR / "tmp_src1.pkl")
+def task_extract_and_transform(**context):
+    df_acc = extract_source_1_accidents()
+    df_infra = extract_source_2_infrastructure()
+    df_weather = extract_source_3_weather_api()
+    df_hom = extract_source_2_homicides_history()
+
+    df_enriched = transform_and_integrate(df_acc, df_infra, df_weather)
+    validate_transformed_data(df_enriched)
+
+    DATA_PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    enriched_path = DATA_PROCESSED_DIR / "dag_enriched_cache.pkl"
+    homicides_path = DATA_PROCESSED_DIR / "dag_homicides_cache.pkl"
+
+    df_enriched.to_pickle(enriched_path)
+    if df_hom is not None:
+        df_hom.to_pickle(homicides_path)
+
+    context["ti"].xcom_push(key="enriched_path", value=str(enriched_path))
+    context["ti"].xcom_push(key="homicides_path", value=str(homicides_path if df_hom is not None else ""))
 
 
-def task_extract_infrastructure():
-    df = extract_source_2_infrastructure()
-    df.to_pickle(DATA_RAW_DIR / "tmp_src2.pkl")
+def task_load_warehouse(**context):
+    import pandas as pd
+
+    ti = context["ti"]
+    enriched_path = ti.xcom_pull(task_ids="extract_transform_validate", key="enriched_path")
+    homicides_path = ti.xcom_pull(task_ids="extract_transform_validate", key="homicides_path")
+
+    df_enriched = pd.read_pickle(enriched_path)
+    df_hom = pd.read_pickle(homicides_path) if homicides_path else None
+    load_to_warehouse(df_enriched, df_homicides_hist=df_hom)
 
 
-def task_extract_weather():
-    df = extract_source_3_weather_api()
-    df.to_pickle(DATA_RAW_DIR / "tmp_src3.pkl")
+def task_train_ml_model(**context):
+    from ml.train_model import train_and_save_model
 
-
-def task_transform_merge():
-    df1 = pd.read_pickle(DATA_RAW_DIR / "tmp_src1.pkl")
-    df2 = pd.read_pickle(DATA_RAW_DIR / "tmp_src2.pkl")
-    df3 = pd.read_pickle(DATA_RAW_DIR / "tmp_src3.pkl")
-    transform_and_integrate(df1, df2, df3)
-
-
-def task_data_quality_gate():
-    df_staged = pd.read_csv(DATA_PROCESSED_DIR / "enriched_incidents_staged.csv")
-    validate_enriched_dataset(df_staged)
-
-
-def task_load_warehouse():
-    df_staged = pd.read_csv(DATA_PROCESSED_DIR / "enriched_incidents_staged.csv")
-    load_dimensional_model(df_staged)
-
-
-def task_publish_kafka_batch():
-    from kafka.producer import run_producer
-    run_producer(delay_seconds=0.5, max_messages=30)
+    metrics = train_and_save_model()
+    context["ti"].xcom_push(key="ml_metrics", value=metrics)
 
 
 with DAG(
-    dag_id="cali_traffic_etl_and_streaming_pipeline",
-    default_args=default_args,
-    description="End-to-end ETL (3 sources), Great Expectations validation gate, Star Schema load, and Kafka stream trigger",
-    schedule_interval="@daily",
+    dag_id="cali_mobility_etl_ml_pipeline",
+    default_args=DEFAULT_ARGS,
+    description="End-to-end Cali mobility batch ETL, DQ validation, Star Schema load, and ML training",
+    schedule="@daily",
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    tags=["etl", "cali", "dimensional-model", "kafka"],
+    tags=["cali", "mobility", "etl", "ml", "kafka"],
 ) as dag:
+    extract_transform_validate = PythonOperator(
+        task_id="extract_transform_validate",
+        python_callable=task_extract_and_transform,
+    )
 
-    extract_1 = PythonOperator(task_id="extract_source1_accidents", python_callable=task_extract_accidents)
-    extract_2 = PythonOperator(task_id="extract_source2_infrastructure", python_callable=task_extract_infrastructure)
-    extract_3 = PythonOperator(task_id="extract_source3_weather_api", python_callable=task_extract_weather)
+    load_star_schema = PythonOperator(
+        task_id="load_star_schema",
+        python_callable=task_load_warehouse,
+    )
 
-    transform_merge = PythonOperator(task_id="transform_and_integrate_sources", python_callable=task_transform_merge)
-    dq_gate = PythonOperator(task_id="validate_data_quality_gate", python_callable=task_data_quality_gate)
-    load_dw = PythonOperator(task_id="load_dimensional_model", python_callable=task_load_warehouse)
-    kafka_stream = PythonOperator(task_id="publish_fact_events_to_kafka", python_callable=task_publish_kafka_batch)
+    train_severity_model = PythonOperator(
+        task_id="train_severity_model",
+        python_callable=task_train_ml_model,
+    )
 
-    [extract_1, extract_2, extract_3] >> transform_merge >> dq_gate >> load_dw >> kafka_stream
+    extract_transform_validate >> load_star_schema >> train_severity_model
