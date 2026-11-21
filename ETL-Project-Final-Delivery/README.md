@@ -69,3 +69,8 @@ Outputs `reports/static_output/static_analytical_report.md` and PNG visualizatio
    ```bash
    python kafka/producer.py
    ```
+   
+## Data Sources & Reproducibility
+1. **Fuente 1 — Siniestralidad vial en Cali (`siniestralidad_2016_2024.csv`)**: Dataset heredado de las entregas anteriores (371,003 registros, 2016–2024, codificación `latin1`, separador `;`). Colócalo en `data/raw/` para ejecución local; si no está presente, `extract.py` utiliza el respaldo reproducible (`cali_accidents_primary.csv`).
+2. **Fuente 2 — Homicidios por condición de víctima (`homicidios_en_accidentes_de_transito_segun_condicion_de_victima_en_el_municipio_de_santiago_de_2.csv`)**: Dataset heredado de entregas previas (serie anual agregada 2004–2021). Como no incluye granularidad espacial por comuna/barrio ni índice de densidad vehicular, se mantiene un respaldo reproducible para el cruce espacial del pipeline.
+3. **Fuente 3 — API Pública Open-Meteo**: Consulta perfiles horarios de temperatura, precipitación y viento para Cali (`3.4516, -76.5320`), con respaldo reproducible si el entorno no tiene acceso a internet.
