@@ -87,7 +87,7 @@ Outputs `reports/static_output/static_analytical_report.md` and PNG visualizatio
   
 ## System Architecture
 
-![Cali Mobility Data Warehouse & Real-Time Risk Streaming Architecture](docs/architecture_diagram.png)
+docs/architecture_diagram.png
 
 The architecture integrates two complementary workflows over a unified data backbone:
 - **Analytical Batch Workflow:** Ingests the three data sources, validates schema and quality rules in Apache Airflow, loads the SQLite Star Schema (`fact_siniestros` + dimensional tables), and powers the static Python analytical report and EDA notebooks.
