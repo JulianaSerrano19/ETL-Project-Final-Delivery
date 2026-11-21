@@ -84,3 +84,11 @@ Outputs `reports/static_output/static_analytical_report.md` and PNG visualizatio
 3. **ML Problem Definition (`es_grave`) Without Data Leakage**:
    - **Target variable (`es_grave`)**: Binary (`1` = confirmed crash with injured or deceased victims [50,860 cases / 13.71%]; `0` = crash without injuries or fatalities [320,143 cases / 86.29%]).
    - **Data leakage prevention**: Outcome columns (`tipo_confirmado`, `tipo_confirmado_limpio`, victim counts) are excluded from predictor features (`X`) during both model training and Kafka event streaming.
+  
+## System Architecture
+
+![Cali Mobility Data Warehouse & Real-Time Risk Streaming Architecture](docs/architecture_diagram.png)
+
+The architecture integrates two complementary workflows over a unified data backbone:
+- **Analytical Batch Workflow:** Ingests the three data sources, validates schema and quality rules in Apache Airflow, loads the SQLite Star Schema (`fact_siniestros` + dimensional tables), and powers the static Python analytical report and EDA notebooks.
+- **Operational Real-Time Workflow:** Trains and serializes the crash severity model (`accident_severity_pipeline.pkl`), publishes leak-free incident events to Apache Kafka (`cali_traffic_incidents_stream`), scores incoming events in real time via the Kafka consumer, persists alerts in `fact_predicciones_streaming`, and updates the live Streamlit dashboard.
