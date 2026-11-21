@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Airflow
+airflow/logs/
+airflow/*.db
+airflow/*.pid
+airflow/*.cfg
+
+# Data & Databases (uncomment raw/db if large, keep structure)
+*.sqlite
+*.db
+data/raw/*.csv
+data/processed/*.parquet
+
+# ML Artifacts (keep placeholder or retrain script)
+# ml/models/*.pkl
+
+# Environment & Secrets
+.env
+.DS_Store
+Thumbs.db
