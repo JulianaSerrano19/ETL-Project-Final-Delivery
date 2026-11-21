@@ -1,6 +1,7 @@
 # ETL Project — Final Delivery: End-to-End Cali Mobility Data Warehouse & Real-Time Risk Streaming
+# Realizado por: Laura Torres, Juliana Toro Serrano
 
-Extension of **ETL-Project-Second-Delivery** integrating multi-source batch orchestration (Apache Airflow + Great Expectations + Star Schema) with operational real-time machine learning inference (Apache Kafka + Scikit-Learn + Streamlit).
+Extension of **ETL-Project-Second-Delivery**g integrating multi-source batch orchestration (Apache Airflow + Great Expectations + Star Schema) with operational real-time machine learning inference (Apache Kafka + Scikit-Learn + Streamlit).
 
 ## Repository Structure
 ```text

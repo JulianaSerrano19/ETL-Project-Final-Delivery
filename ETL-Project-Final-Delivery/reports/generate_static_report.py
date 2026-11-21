@@ -1,6 +1,6 @@
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -43,11 +43,12 @@ def generate_report():
 
     # Chart 1: Severity Rate by Vehicle Type
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    veh_summary = df.groupby("clase_vehiculo")["is_severe_injury"].mean().sort_values(ascending=False) * 100
+    veh_summary = (df.groupby("clase_vehiculo")["is_severe_injury"].mean() * 100).sort_values(ascending=False)
     sns.barplot(x=veh_summary.index, y=veh_summary.values, palette="Blues_d", ax=ax)
     ax.set_title("Severe Injury Rate (%) by Vehicle Class")
     ax.set_ylabel("Severe Injury Rate (%)")
     ax.set_xlabel("Vehicle Class")
+    plt.xticks(rotation=25, ha="right")
     plt.tight_layout()
     chart1_path = REPORT_OUTPUT_DIR / "chart1_severity_by_vehicle.png"
     plt.savefig(chart1_path, dpi=150)
@@ -65,16 +66,19 @@ def generate_report():
     plt.savefig(chart2_path, dpi=150)
     plt.close()
 
-    # Chart 3: Incident Hotspots by Comuna & Severity
+    # Chart 3: Incident Hotspots by Comuna & Severity (Top 10)
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    comuna_stats = df.groupby("comuna").agg(
-        total_incidents=("incident_id", "count"),
-        severe_rate=("is_severe_injury", "mean")
-    ).sort_values("total_incidents", ascending=False)
+    comuna_stats = (
+        df.groupby("comuna")
+        .agg(total_incidents=("incident_id", "count"), severe_rate=("is_severe_injury", "mean"))
+        .sort_values("total_incidents", ascending=False)
+        .head(10)
+    )
     sns.barplot(x=comuna_stats.index, y=comuna_stats["total_incidents"], palette="crest", ax=ax)
-    ax.set_title("Total Traffic Incidents by Comuna in Cali")
+    ax.set_title("Top Comunas by Traffic Incidents in Cali")
     ax.set_xlabel("Comuna")
     ax.set_ylabel("Total Incidents")
+    plt.xticks(rotation=25, ha="right")
     plt.tight_layout()
     chart3_path = REPORT_OUTPUT_DIR / "chart3_incidents_by_comuna.png"
     plt.savefig(chart3_path, dpi=150)
@@ -85,12 +89,19 @@ def generate_report():
     overall_severe_pct = df["is_severe_injury"].mean() * 100
     top_vehicle = veh_summary.index[0]
     top_vehicle_rate = veh_summary.iloc[0]
-    rain_severe = df[df["weather_condition"] == "Rainy"]["is_severe_injury"].mean() * 100
-    clear_severe = df[df["weather_condition"] != "Rainy"]["is_severe_injury"].mean() * 100
+
+    rain_mask = df["weather_condition"].astype(str).str.contains("rain|lluv", case=False, na=False)
+    rain_df = df[rain_mask]
+    clear_df = df[~rain_mask]
+
+    rain_severe_str = f"{rain_df['is_severe_injury'].mean() * 100:.2f}%" if not rain_df.empty else "N/A"
+    clear_severe_str = f"{clear_df['is_severe_injury'].mean() * 100:.2f}%" if not clear_df.empty else "N/A"
+
     top_comuna = comuna_stats.index[0]
+    generated_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     report_md = f"""# Static Analytical Report: Cali Traffic Incidents & Weather Impact
-**Generated at (UTC):** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}  
+**Generated at (UTC):** {generated_ts}
 **Data Source:** Validated Dimensional Warehouse (`fact_traffic_incident` + 4 Dimensions)
 
 ## 1. Executive KPIs
@@ -102,16 +113,16 @@ def generate_report():
 ## 2. Analytical Questions & Key Findings
 
 ### Q1: Which vehicle classes experience the highest proportion of severe injuries?
-- **{top_vehicle}** accounts for the highest severity rate at **{top_vehicle_rate:.2f}%**, confirming the vulnerability of two-wheeled commuters in high-density corridors.
+- **{top_vehicle}** accounts for the highest severity rate at **{top_vehicle_rate:.2f}%**, highlighting higher exposure to severe outcomes among this vehicle group.
 - ![Severity by Vehicle](chart1_severity_by_vehicle.png)
 
 ### Q2: How do weather conditions (rainfall) and time of day affect incident severity?
-- During **Rainy** conditions (`precipitation_mm > 0.5`), the severe injury rate climbs to **{rain_severe:.2f}%** compared to **{clear_severe:.2f}%** under clear/cloudy conditions.
-- Peak congestion hours (17:00–20:00) coincide with afternoon precipitation spikes in Cali, compounding collision risk.
+- During **Rainy** conditions, the severe injury rate is **{rain_severe_str}** compared to **{clear_severe_str}** under non-rainy conditions.
+- Comparing hourly incident counts across weather conditions helps identify peak hours where congestion and rain overlap.
 - ![Hourly Weather Impact](chart2_hourly_weather_impact.png)
 
 ### Q3: Where should municipal transit authorities prioritize preventive deployment?
-- **{top_comuna}** concentrates the highest volume of incidents, particularly along arterial roads with `traffic_density_index > 0.70`.
+- **{top_comuna}** leads in incident volume among the top evaluated comunas, making it a priority focus for preventive mobility interventions.
 - ![Incidents by Comuna](chart3_incidents_by_comuna.png)
 """
 

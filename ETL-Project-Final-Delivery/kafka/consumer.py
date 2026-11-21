@@ -16,6 +16,24 @@ REQUIRED_FEATURES = [
     "wind_speed_kmh", "traffic_density_index"
 ]
 
+CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS streaming_incident_predictions (
+    event_id TEXT PRIMARY KEY,
+    incident_id TEXT,
+    event_timestamp TEXT,
+    comuna TEXT,
+    clase_vehiculo TEXT,
+    hour_of_day INTEGER,
+    temperature_c REAL,
+    precipitation_mm REAL,
+    traffic_density_index REAL,
+    predicted_severe_risk INTEGER,
+    severe_probability REAL,
+    risk_level TEXT,
+    processed_at TEXT
+)
+"""
+
 
 def classify_risk(prob: float) -> str:
     if prob >= 0.70:
@@ -31,7 +49,16 @@ def validate_message(msg: dict) -> bool:
     if "event_id" not in msg or "incident_id" not in msg or "features" not in msg:
         return False
     features = msg["features"]
+    if not isinstance(features, dict):
+        return False
     return all(col in features and features[col] is not None for col in REQUIRED_FEATURES)
+
+
+def ensure_predictions_table():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(CREATE_TABLE_SQL)
+        conn.commit()
 
 
 def persist_prediction(record: dict):
@@ -65,6 +92,8 @@ def run_consumer():
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"Serialized model not found at {MODEL_PATH}. Run ml/train_model.py first.")
 
+    ensure_predictions_table()
+
     artifact = joblib.load(MODEL_PATH)
     pipeline = artifact["pipeline"]
     feature_cols = artifact["feature_cols"]
@@ -73,7 +102,7 @@ def run_consumer():
     consumer = KafkaConsumer(
         KAFKA_TOPIC_ACCIDENTS,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        auto_offset_reset="latest",
+        auto_offset_reset="earliest",
         enable_auto_commit=True,
         group_id="cali-incident-inference-group",
         value_deserializer=lambda m: json.loads(m.decode("utf-8"))

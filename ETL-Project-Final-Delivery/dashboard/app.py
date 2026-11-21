@@ -29,9 +29,9 @@ st.sidebar.info(
 def load_live_predictions(limit: int = 200) -> pd.DataFrame:
     if not DB_PATH.exists():
         return pd.DataFrame()
+    limit = int(limit)
     query = f"""
     SELECT
-        prediction_id,
         event_id,
         incident_id,
         event_timestamp,
@@ -46,7 +46,7 @@ def load_live_predictions(limit: int = 200) -> pd.DataFrame:
         risk_level,
         processed_at
     FROM streaming_incident_predictions
-    ORDER BY prediction_id DESC
+    ORDER BY processed_at DESC
     LIMIT {limit}
     """
     try:
@@ -61,6 +61,8 @@ df = load_live_predictions()
 if df.empty:
     st.warning("Waiting for incoming Kafka consumer predictions... Start `kafka/consumer.py` and `kafka/producer.py`.")
 else:
+    df["precipitation_size"] = df["precipitation_mm"].fillna(0).clip(lower=0) + 0.1
+
     total_processed = len(df)
     high_risk_count = int((df["risk_level"] == "HIGH").sum())
     avg_prob = df["severe_probability"].mean() * 100
@@ -92,8 +94,8 @@ else:
             x="traffic_density_index",
             y="severe_probability",
             color="clase_vehiculo",
-            size="precipitation_mm",
-            hover_data=["incident_id", "comuna", "hour_of_day"],
+            size="precipitation_size",
+            hover_data=["incident_id", "comuna", "hour_of_day", "precipitation_mm"],
             title="Predicted Severity Probability vs. Traffic Density & Rain"
         )
         st.plotly_chart(fig_scatter, use_container_width=True)
