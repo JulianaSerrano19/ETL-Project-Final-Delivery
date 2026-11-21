@@ -70,7 +70,17 @@ Outputs `reports/static_output/static_analytical_report.md` and PNG visualizatio
    python kafka/producer.py
    ```
    
-## Data Sources & Reproducibility
-1. **Fuente 1 — Siniestralidad vial en Cali (`siniestralidad_2016_2024.csv`)**: Dataset heredado de las entregas anteriores (371,003 registros, 2016–2024, codificación `latin1`, separador `;`). Colócalo en `data/raw/` para ejecución local; si no está presente, `extract.py` utiliza el respaldo reproducible (`cali_accidents_primary.csv`).
-2. **Fuente 2 — Homicidios por condición de víctima (`homicidios_en_accidentes_de_transito_segun_condicion_de_victima_en_el_municipio_de_santiago_de_2.csv`)**: Dataset heredado de entregas previas (serie anual agregada 2004–2021). Como no incluye granularidad espacial por comuna/barrio ni índice de densidad vehicular, se mantiene un respaldo reproducible para el cruce espacial del pipeline.
-3. **Fuente 3 — API Pública Open-Meteo**: Consulta perfiles horarios de temperatura, precipitación y viento para Cali (`3.4516, -76.5320`), con respaldo reproducible si el entorno no tiene acceso a internet.
+## Data Sources, Schema & ML Target Definition
+
+1. **Source Continuity (Deliverables 1, 2 & Final)**:
+   - **Source 1 (`siniestralidad_2016_2024.csv`)**: Historical road traffic accident dataset for Cali (371,003 records, 2016–2024, `latin1` encoding, `;` delimiter). Read from `data/raw/` and preserves the full set of standardized records in `fact_siniestros`.
+   - **Source 2 (`homicidios_en_accidentes_de_transito_segun_condicion_de_victima_en_el_municipio_de_santiago_de_2.csv`)**: Annual historical series (2004–2021, 5,254 fatalities by victim condition). Because it lacks spatial granularity by comuna/neighborhood and traffic density metrics, it populates the historical dimension `dim_victimas`, while a reproducible fallback supplies spatial attributes (`zona`, `via_tipo`, `traffic_density_index`) for pipeline integration.
+   - **Source 3 (Open-Meteo API)**: Hourly profiles of temperature, precipitation, and wind speed for Cali (`3.4516, -76.5320`), with an offline reproducible fallback.
+
+2. **Cleaning, Quality & Dimensional Model**:
+   - In `src/etl/transform.py`, duplicate columns are removed, corrupted characters (`latin1`) are fixed, missing-value markers (`.`, `SD`, nulls) are standardized, and dates and numeric fields are properly typed.
+   - In `src/quality/validator.py`, `incident_id` uniqueness, temporal integrity, clean domains, and numeric ranges are validated before loading the star schema (`fact_siniestros`, `dim_tiempo`, `dim_victimas`, `dim_clima_movilidad`).
+
+3. **ML Problem Definition (`es_grave`) Without Data Leakage**:
+   - **Target variable (`es_grave`)**: Binary (`1` = confirmed crash with injured or deceased victims [50,860 cases / 13.71%]; `0` = crash without injuries or fatalities [320,143 cases / 86.29%]).
+   - **Data leakage prevention**: Outcome columns (`tipo_confirmado`, `tipo_confirmado_limpio`, victim counts) are excluded from predictor features (`X`) during both model training and Kafka event streaming.
